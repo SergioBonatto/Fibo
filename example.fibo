@@ -1,0 +1,5 @@
+let true  = λt.λf.t
+let false = λt.λf.f
+let neg   = λb. (b false true)
+
+(neg true)
