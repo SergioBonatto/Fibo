@@ -19,7 +19,7 @@ let rec substitute expr var value =
   | Var v -> Var v
 
 let tokenize expr =
-  let expr = Str.global_replace (Str.regexp "[λ.()=]") " \\0 " expr in
+  let expr = Str.global_replace (Str.regexp "[\\.()=\\\\]") " \\0 " expr in
   let expr = Str.global_replace (Str.regexp "[ \t\n\r]+") " " expr in
   let tokens = Str.split (Str.regexp " ") expr in
   List.filter (fun s -> s <> "") tokens
@@ -29,7 +29,7 @@ let rec parse_expression tokens pos =
     raise (LambdaParseError "Fim inesperado da expressão")
   else
     let current = tokens.(pos) in
-    if current = "λ" then
+    if current = "\\" then
       if pos + 2 >= Array.length tokens || tokens.(pos + 2) <> "." then
         raise (LambdaParseError "Sintaxe inválida para expressão lambda")
       else
@@ -110,10 +110,9 @@ let process_code code =
   match !last_expr with
   | None -> raise (LambdaParseError "Nenhuma expressão para avaliar")
   | Some expr ->
+      printf "Ambiente: %s\n" (String.concat ", " (List.map (fun (name, expr) -> name ^ " = " ^ (expression_to_string expr)) !env));
+      printf "Expressão: %s\n" (expression_to_string expr);
       evaluate expr !env 1000
-
-
-
 
 let main () =
   if Array.length Sys.argv <> 2 then (
@@ -126,6 +125,7 @@ let main () =
       let code = really_input_string ic (in_channel_length ic) in
       close_in ic;
       let result = process_code code in
+      printf "Resultado da avaliação: %s\n" (expression_to_string result);
       printf "=> %s\n" (expression_to_string result)
     with
     | LambdaParseError e ->
