@@ -1,11 +1,13 @@
-let true  = \t.\f.t
-let false = \t.\f.f
-let neg   = \b. (b false true)
+let true  = λt.λf.t
+let false = λt.λf.f
+let neg   = λb. (b false true)
 
-let cons = \h.\t.\c.\n. (c h (t c n))
-let nil  =       \c.\n.n
+let cons = λh.λt.λc.λn. (c h (t c n))
+let nil  =       λc.λn.n
 
-let map = \f.\h.\t. (cons (f h) (map f t))
+let map = λf.λh.λt. (cons (f h) (map f t))
 
 
 (neg true)
+
+
