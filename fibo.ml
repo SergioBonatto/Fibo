@@ -1,141 +1,157 @@
-open Printf
-
-type expression =
-  | LambdaExpression of string * expression
-  | Application of expression * expression
+(* Tipos básicos para representar expressões lambda *)
+type expr =
   | Var of string
+  | Lambda of string * expr
+  | App of expr * expr
 
-exception LambdaParseError of string
+(* Ambiente para armazenar definições *)
+module StrMap = Map.Make(String)
+type environment = expr StrMap.t
 
+(* Exceções personalizadas *)
+exception Parse_error of string
+exception Runtime_error of string
+
+(* Função auxiliar para dividir string em tokens *)
+let tokenize str =
+  (* Usamos o caractere lambda unicode diretamente *)
+  let lambda = "\xCE\xBB" in (* λ em UTF-8 *)
+  let is_space = function ' ' | '\t' | '\n' | '\r' -> true | _ -> false in
+  let is_special = function '(' | ')' | '.' | '=' -> true | _ -> false in
+
+  let rec split acc curr = function
+    | [] -> List.rev (if curr = [] then acc else (String.concat "" (List.rev curr)) :: acc)
+    | '\xCE' :: '\xBB' :: rest ->  (* Detecta λ em UTF-8 *)
+        let new_acc = if curr = [] then lambda :: acc
+                     else lambda :: (String.concat "" (List.rev curr)) :: acc in
+        split new_acc [] rest
+    | c :: rest when is_space c ->
+        split (if curr = [] then acc else (String.concat "" (List.rev curr)) :: acc) [] rest
+    | c :: rest when is_special c ->
+        let new_acc = if curr = [] then String.make 1 c :: acc
+                     else String.make 1 c :: (String.concat "" (List.rev curr)) :: acc in
+        split new_acc [] rest
+    | c :: rest ->
+        split acc (String.make 1 c :: curr) rest
+  in
+  str
+  |> String.to_seq
+  |> List.of_seq
+  |> split [] []
+  |> List.filter (fun s -> s <> "")
+
+(* Parser recursivo descendente *)
+let parse tokens =
+  let rec parse_expr = function
+    | [] -> raise (Parse_error "Unexpected end of input")
+    | t :: var :: "." :: rest when t = "\xCE\xBB" ->
+        let body, remaining = parse_expr rest in
+        Lambda(var, body), remaining
+    | "(" :: rest ->
+        let func, rest1 = parse_expr rest in
+        let arg, rest2 = parse_expr rest1 in
+        (match rest2 with
+        | ")" :: remaining -> App(func, arg), remaining
+        | _ -> raise (Parse_error "Missing closing parenthesis"))
+    | token :: rest ->
+        if token = ")" then raise (Parse_error "Unexpected closing parenthesis")
+        else Var(token), rest
+  in
+
+  let expr, remaining = parse_expr tokens in
+  if remaining <> [] then
+    raise (Parse_error "Extra tokens after expression")
+  else expr
+
+(* Substituição de variáveis, evitando captura *)
 let rec substitute expr var value =
   match expr with
-  | LambdaExpression (v, body) when v = var -> expr
-  | LambdaExpression (v, body) ->
-      if v = var then expr
-      else LambdaExpression (v, substitute body var value)
-  | Application (func, arg) ->
-      Application (substitute func var value, substitute arg var value)
-  | Var v when v = var -> value
-  | Var v -> Var v
+  | Var x when x = var -> value
+  | Var x -> Var x
+  | Lambda(x, body) when x = var -> Lambda(x, body)
+  | Lambda(x, body) -> Lambda(x, substitute body var value)
+  | App(e1, e2) -> App(substitute e1 var value, substitute e2 var value)
 
-let tokenize expr =
-  let expr = Str.global_replace (Str.regexp "[\\.()=\\\\]") " \\0 " expr in
-  let expr = Str.global_replace (Str.regexp "[ \t\n\r]+") " " expr in
-  let tokens = Str.split (Str.regexp " ") expr in
-  List.filter (fun s -> s <> "") tokens
-
-let rec parse_expression tokens pos =
-  if pos >= Array.length tokens then
-    raise (LambdaParseError "Fim inesperado da expressão")
-  else
-    let current = tokens.(pos) in
-    if current = "\\" then
-      if pos + 2 >= Array.length tokens || tokens.(pos + 2) <> "." then
-        raise (LambdaParseError "Sintaxe inválida para expressão lambda")
-      else
-        let var = tokens.(pos + 1) in
-        if not (Str.string_match (Str.regexp "[a-zA-Z0-9]+") var 0) then
-          raise (LambdaParseError ("Nome de variável inválido: " ^ var))
-        else
-          let body, new_pos = parse_expression tokens (pos + 3) in
-          LambdaExpression (var, body), new_pos
-    else if current = "(" then
-      let func, pos = parse_expression tokens (pos + 1) in
-      let rec parse_args func pos =
-        if pos >= Array.length tokens then
-          raise (LambdaParseError "Parêntese não fechado")
-        else if tokens.(pos) = ")" then
-          func, pos + 1
-        else
-          let arg, new_pos = parse_expression tokens pos in
-          parse_args (Application (func, arg)) new_pos
-      in
-      parse_args func pos
-    else if current = ")" || current = "." || current = "=" then
-      raise (LambdaParseError ("Token inesperado: " ^ current))
-    else
-      Var current, pos + 1
-
-let parse_definition tokens pos =
-  if pos + 2 >= Array.length tokens || tokens.(pos + 2) <> "=" then
-    raise (LambdaParseError "Sintaxe inválida para definição let")
-  else
-    let name = tokens.(pos + 1) in
-    let expr, new_pos = parse_expression tokens (pos + 3) in
-    name, expr, new_pos
-
-let rec evaluate expr env max_steps =
-  let rec eval expr steps =
-    if steps >= max_steps then
-      raise (Failure "Número máximo de passos de redução excedido")
+(* Avaliador *)
+let rec evaluate env expr =
+  let rec eval_steps steps expr =
+    if steps > 1000 then
+      raise (Runtime_error "Maximum evaluation steps exceeded")
     else
       match expr with
-      | Var v -> (
-          try List.assoc v env with Not_found -> expr)
-      | LambdaExpression _ -> expr
-      | Application (func, arg) -> (
-          match eval func (steps + 1) with
-          | LambdaExpression (var, body) ->
-              eval (substitute body var (eval arg (steps + 1))) (steps + 1)
-          | func' -> Application (func', eval arg (steps + 1)))
+      | Var x ->
+          (match StrMap.find_opt x env with
+          | Some e -> eval_steps (steps + 1) e
+          | None -> expr)
+      | Lambda _ -> expr
+      | App(e1, e2) ->
+          let v1 = eval_steps steps e1 in
+          let v2 = eval_steps steps e2 in
+          match v1 with
+          | Lambda(x, body) -> eval_steps (steps + 1) (substitute body x v2)
+          | _ -> App(v1, v2)
   in
-  eval expr 0
+  eval_steps 0 expr
 
+(* Processamento de definições e expressões *)
+let process_line env line =
+  let tokens = tokenize line in
+  match tokens with
+  | "let" :: name :: "=" :: rest ->
+      let expr = parse rest in
+      (StrMap.add name expr env, None)
+  | _ ->
+      let expr = parse tokens in
+      (env, Some(evaluate env expr))
 
-let rec expression_to_string expr =
-  match expr with
-  | LambdaExpression (var, body) -> Printf.sprintf "λ%s.%s" var (expression_to_string body)
-  | Application (func, arg) ->
-      let func_str = expression_to_string func in
-      let arg_str = expression_to_string arg in
-      Printf.sprintf "(%s %s)" func_str arg_str
-  | Var v -> v
+(* Função principal para processar o arquivo *)
+let process_file filename =
+  let lines =
+    let ic = open_in filename in
+    let rec read_lines acc =
+      try
+        let line = input_line ic in
+        if line = "" then read_lines acc
+        else read_lines (line :: acc)
+      with End_of_file ->
+        close_in ic;
+        List.rev acc
+    in
+    read_lines []
+  in
 
+  let rec process_lines env = function
+    | [] -> raise (Runtime_error "No expression to evaluate")
+    | [last] ->
+        let _, result = process_line env last in
+        (match result with
+        | Some expr -> expr
+        | None -> raise (Runtime_error "Last line must be an expression"))
+    | line :: rest ->
+        let new_env, _ = process_line env line in
+        process_lines new_env rest
+  in
 
-let process_code code =
-  let env = ref [] in
-  let lines = List.filter (fun s -> s <> "") (Str.split (Str.regexp "\n") code) in
-  let last_expr = ref None in
-  List.iter
-    (fun line ->
-      let tokens = Array.of_list (tokenize line) in
-      if Array.length tokens > 0 then
-        if tokens.(0) = "let" then
-          let name, expr, _ = parse_definition tokens 0 in
-          env := (name, expr) :: !env
-        else
-          let expr, _ = parse_expression tokens 0 in
-          last_expr := Some expr)
-    lines;
-  match !last_expr with
-  | None -> raise (LambdaParseError "Nenhuma expressão para avaliar")
-  | Some expr ->
-      printf "Ambiente: %s\n" (String.concat ", " (List.map (fun (name, expr) -> name ^ " = " ^ (expression_to_string expr)) !env));
-      printf "Expressão: %s\n" (expression_to_string expr);
-      evaluate expr !env 1000
+  process_lines StrMap.empty lines
 
-let main () =
-  if Array.length Sys.argv <> 2 then (
-    printf "Uso: ocaml fibo.ml <arquivo>\n";
-    exit 1)
-  else
-    let file_path = Sys.argv.(1) in
-    try
-      let ic = open_in file_path in
-      let code = really_input_string ic (in_channel_length ic) in
-      close_in ic;
-      let result = process_code code in
-      printf "Resultado da avaliação: %s\n" (expression_to_string result);
-      printf "=> %s\n" (expression_to_string result)
-    with
-    | LambdaParseError e ->
-        printf "Erro de parsing: %s\n" e;
-        exit 1
-    | Sys_error e ->
-        printf "Erro de arquivo: %s\n" e;
-        exit 1
-    | Failure e ->
-        printf "Erro inesperado: %s\n" e;
-        exit 1
+(* Pretty printer para expressões *)
+let rec string_of_expr = function
+  | Var x -> x
+  | Lambda(x, body) -> "λ" ^ x ^ ". " ^ string_of_expr body
+  | App(e1, e2) -> "(" ^ string_of_expr e1 ^ " " ^ string_of_expr e2 ^ ")"
 
-let () = main ()
+(* Função main *)
+let () =
+  if Array.length Sys.argv <> 2 then begin
+    Printf.printf "Uso: %s <arquivo>\n" Sys.argv.(0);
+    exit 1
+  end;
+
+  try
+    let result = process_file Sys.argv.(1) in
+    Printf.printf "=> %s\n" (string_of_expr result)
+  with
+  | Parse_error msg -> Printf.printf "Erro de parsing: %s\n" msg
+  | Runtime_error msg -> Printf.printf "Erro de execução: %s\n" msg
+  | Sys.Break -> Printf.printf "Operação cancelada\n"
+  | e -> Printf.printf "Erro inesperado: %s\n" (Printexc.to_string e)

@@ -2,4 +2,10 @@ let true  = \t.\f.t
 let false = \t.\f.f
 let neg   = \b. (b false true)
 
+let cons = \h.\t.\c.\n. (c h (t c n))
+let nil  =       \c.\n.n
+
+let map = \f.\h.\t. (cons (f h) (map f t))
+
+
 (neg true)
